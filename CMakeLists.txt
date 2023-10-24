@@ -1,7 +1,12 @@
 cmake_minimum_required(VERSION 3.14)
 
 project(qmllibcameraplugin)
-find_package(Qt5 REQUIRED COMPONENTS Core Qml Quick)
+
+# Specify the required Qt modules
+find_package(QT NAMES Qt6)
+
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Qml Quick)
+qt_standard_project_setup()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,7 +23,7 @@ set(SOURCES plugin.cpp)
 
 add_library(qmllibcameraplugin SHARED ${SOURCES})
 
-target_link_libraries(qmllibcameraplugin PRIVATE Qt5::Core Qt5::Qml Qt5::Quick PkgConfig::LIBCAMERA)
+target_link_libraries(qmllibcameraplugin PRIVATE Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Qml Qt${QT_VERSION_MAJOR}::Quick PkgConfig::LIBCAMERA)
 
 set_target_properties(qmllibcameraplugin PROPERTIES
                       LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/LibCamera")
@@ -27,3 +32,6 @@ add_custom_command(TARGET qmllibcameraplugin POST_BUILD
                    COMMAND ${CMAKE_COMMAND} -E copy
                            ${CMAKE_SOURCE_DIR}/LibCamera/qmldir
                            ${CMAKE_BINARY_DIR}/LibCamera/qmldir)
+
+# Add sample app
+add_subdirectory(testapp)

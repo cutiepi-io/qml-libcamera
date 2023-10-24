@@ -9,6 +9,22 @@
 
 using namespace libcamera;
 
+static const QMap<libcamera::PixelFormat, QImage::Format> nativeFormats
+{
+#if QT_VERSION >= QT_VERSION_CHECK(5, 2, 0)
+    { libcamera::formats::ABGR8888, QImage::Format_RGBX8888 },
+    { libcamera::formats::XBGR8888, QImage::Format_RGBX8888 },
+#endif
+    { libcamera::formats::ARGB8888, QImage::Format_RGB32 },
+    { libcamera::formats::XRGB8888, QImage::Format_RGB32 },
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+    { libcamera::formats::RGB888, QImage::Format_BGR888 },
+#endif
+    { libcamera::formats::BGR888, QImage::Format_RGB888 },
+    { libcamera::formats::RGB565, QImage::Format_RGB16 },
+};
+
+
 class LibCameraModel : public QObject
 {
     Q_OBJECT
@@ -16,7 +32,7 @@ class LibCameraModel : public QObject
     Q_PROPERTY(int orientation READ orientation WRITE setOrientation NOTIFY orientationChanged)
 
 public:
-    LibCameraModel(QObject* parent = nullptr) 
+    LibCameraModel(QObject* parent = nullptr)
         : QObject(parent)
         , m_orientation(0)
     {
@@ -34,16 +50,43 @@ public:
         camera = cm->cameras()[0];
         camera->acquire();
 
-        config = camera->generateConfiguration({libcamera::StreamRole::StillCapture});
+        config = camera->generateConfiguration(
+            {
+             libcamera::StreamRole::Viewfinder,
+             libcamera::StreamRole::Raw
+            }
+        );
         if (!config) {
-            qDebug() << "Failed to generate default configuration";
+            qDebug() << "Failed to generate default configuration for still";
         }
+        qDebug() << config->size();
+        libcamera::StreamConfiguration &viewConfig = config->at(0);
+        libcamera::StreamConfiguration &rawConfig = config->at(1);
 
-        libcamera::StreamConfiguration &streamConfig = config->at(0);
-        streamConfig.pixelFormat = libcamera::formats::RGB888;
-        streamConfig.size = { 2592, 1944 };
-        config->addConfiguration(streamConfig);
-        config->validate();
+        PixelFormat format;
+
+        format = getBestFormat(viewConfig);
+        if (format.isValid() == false)
+            qWarning("Could not configure pixel format matching licamera and QImage");
+        qDebug() << viewConfig.size.toString();
+        format = getBestFormat(rawConfig);
+        if (format.isValid() == false)
+            qWarning("Could not configure pixel format matching licamera and QImage");
+        qDebug() << rawConfig.size.toString();
+        config->addConfiguration(viewConfig);
+        config->addConfiguration(rawConfig);
+
+
+        libcamera::CameraConfiguration::Status status = config->validate();
+
+        if (status == libcamera::CameraConfiguration::Invalid)
+        {
+            qWarning("Failed to configure the stream");
+        }
+        else if (status == libcamera::CameraConfiguration::Adjusted)
+        {
+            qWarning("Configuration of the stream was adjusted");
+        }
 
         if (camera->configure(config.get())) {
             qDebug() << "Failed to configure camera";
@@ -67,6 +110,24 @@ public:
             camera->release();
         }
         delete cm;
+    }
+
+    PixelFormat getBestFormat(libcamera::StreamConfiguration &streamConfig) {
+        std::vector<PixelFormat> formats = streamConfig.formats().pixelformats();
+
+        for (const PixelFormat &format : nativeFormats.keys()) {
+            auto match = std::find_if(formats.begin(), formats.end(),
+                                      [&](const PixelFormat &f) {
+                                          return f == format;
+                                      });
+            if (match != formats.end()) {
+                streamConfig.pixelFormat = format;
+                return format;
+                m_viewFinderFormat = nativeFormats[format];
+                break;
+            }
+        }
+        return PixelFormat();
     }
 
     QString filename() const {
@@ -119,6 +180,7 @@ signals:
 
 public slots:
     void handleRequestCompleted(libcamera::Request *completedRequest) {
+        qDebug() << "handleRequestCompleted";
         if(!completedRequest)
             return;
 
@@ -137,7 +199,7 @@ public slots:
         }
 
         libcamera::Size size = config->at(0).size;
-        QImage image(static_cast<uchar *>(data), size.width, size.height, QImage::Format_RGB888);
+        QImage image(static_cast<uchar *>(data), size.width, size.height, m_viewFinderFormat);
         image = image.transformed(QTransform().rotate(m_orientation), Qt::FastTransformation);
         image.save(m_filename);
 
@@ -156,6 +218,9 @@ private:
     std::unique_ptr<libcamera::FrameBufferAllocator> allocator;
     QString m_filename;
     int m_orientation;
+    QImage::Format  m_viewFinderFormat;
+    QImage::Format  m_rawFormat;
+
 };
 
 class LibCameraPlugin : public QQmlExtensionPlugin
