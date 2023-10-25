@@ -70,20 +70,19 @@ public:
 
         config = camera->generateConfiguration(
             {
-             libcamera::StreamRole::Viewfinder/*,
-             libcamera::StreamRole::VideoRecording*/
+             libcamera::StreamRole::Viewfinder,
+             libcamera::StreamRole::VideoRecording
             }
         );
         if (!config) {
             qDebug() << "Failed to generate default configuration for still";
         }
-        qDebug() << config->size();
         libcamera::StreamConfiguration &viewConfig = config->at(0);
-        // libcamera::StreamConfiguration &videoConfig = config->at(1);
+        libcamera::StreamConfiguration &videoConfig = config->at(1);
 
         // Override default resolution
-        viewConfig.size = { 2592, 1944 };
-
+        viewConfig.size = { 640, 480 };
+        videoConfig.size = { 640, 480 };
         PixelFormat format;
 
         format = getBestFormat(viewConfig);
@@ -91,18 +90,18 @@ public:
             qWarning("Could not configure pixel format matching licamera and QImage");
         else
             m_viewFinderFormat = nativeFormats[format];
-        qDebug() << "Configured pixel format for view";
+        qDebug() << "Configured pixel format for view:" << m_viewFinderFormat;
         qDebug() << viewConfig.size.toString().c_str();
         m_size = viewConfig.size;
 
 
-        // format = getBestFormat(videoConfig);
-        // if (format.isValid() == false)
-        //     qWarning("Could not configure pixel format matching licamera and QImage");
-        // else
-        //     m_secondaryFormat = nativeFormats[format];
-        // qDebug() << "Configured pixel format for raw";
-        // qDebug() << videoConfig.size.toString().c_str();
+        format = getBestFormat(videoConfig);
+        if (format.isValid() == false)
+            qWarning("Could not configure pixel format matching licamera and QImage");
+        else
+            m_secondaryFormat = nativeFormats[format];
+        qDebug() << "Configured pixel format for secondary:" << m_secondaryFormat;
+        qDebug() << videoConfig.size.toString().c_str();
 
 
         libcamera::CameraConfiguration::Status status = config->validate();
@@ -122,9 +121,9 @@ public:
 
         allocator = std::make_unique<libcamera::FrameBufferAllocator>(camera);
         m_previewStream = config->at(0).stream();
-        // m_secondaryStream = config->at(1).stream();
+        m_secondaryStream = config->at(1).stream();
         configureStreamBuffers(m_previewStream);
-        // configureStreamBuffers(m_secondaryStream);
+        configureStreamBuffers(m_secondaryStream);
 
 
         /* Create requests and fill them with buffers from the viewfinder. */
@@ -144,7 +143,22 @@ public:
             qDebug() << "Adding request";
             requests.push_back(std::move(request));
         }
+        while (!freeBuffers[m_secondaryStream].isEmpty()) {
+            FrameBuffer *buffer = freeBuffers[m_secondaryStream].dequeue();
 
+            std::unique_ptr<Request> request = camera->createRequest();
+            if (!request) {
+                qWarning() << "Can't create request";
+                ret = -ENOMEM;
+            }
+
+            ret = request->addBuffer(m_secondaryStream, buffer);
+            if (ret < 0) {
+                qWarning() << "Can't set buffer for request";
+            }
+            qDebug() << "Adding request";
+            requests.push_back(std::move(request));
+        }
         if (camera->start()) {
             qWarning("Failed to start the camera");
         }
@@ -186,7 +200,6 @@ public:
 
     PixelFormat getBestFormat(libcamera::StreamConfiguration &streamConfig) {
         std::vector<PixelFormat> formats = streamConfig.formats().pixelformats();
-        qDebug() << formats.size();
         for (const PixelFormat &format : nativeFormats.keys()) {
             auto match = std::find_if(formats.begin(), formats.end(),
                                       [&](const PixelFormat &f) {
@@ -278,7 +291,11 @@ public slots:
             buffer = request->buffers().at(m_previewStream);
             processViewfinder(buffer);
         }
-
+        if (request->buffers().count(m_secondaryStream))
+        {
+            buffer = request->buffers().at(m_secondaryStream);
+            processSecondaryStream(buffer);
+        }
         request->reuse();
         {
             QMutexLocker locker(&mutex);
@@ -306,14 +323,36 @@ public slots:
         }
         update();
         if (buffer) // we don't care of it anymore, put it to garbage
-            renderComplete(buffer);
+            renderComplete(buffer, m_previewStream);
+    }
+
+    void processSecondaryStream(FrameBuffer *buffer)
+    {
+        /* Render the frame on the viewfinder. */
+        // size_t size = buffer->metadata().planes()[0].bytesused;
+
+        // {
+        //     QMutexLocker locker(&mutex);
+
+        //     auto image = mappedBuffers[buffer].get();
+        //     // qDebug() << buffer->planes().size() << image << m_viewFinderFormat << size << m_size.toString().c_str();
+        //     assert(buffer->planes().size() >= 1);
+        //     m_image = QImage(image->data(0).data(), m_size.width,
+        //                         m_size.height,
+        //                         m_viewFinderFormat);
+        //     // m_image = m_image.transformed(QTransform().rotate(m_orientation), Qt::FastTransformation);
+        //     std::swap(buffer, displayedBuffer);
+        // }
+        // update();
+        if (buffer) // we don't care of it anymore, put it to garbage
+            renderComplete(buffer, m_secondaryStream);
     }
 
     void paint(QPainter* painter) {
         painter->drawImage(QRect(0,0,width(),height()), m_image);
     }
 
-    void renderComplete(FrameBuffer *buffer)
+    void renderComplete(FrameBuffer *buffer, libcamera::Stream *stream)
     {
         Request *request;
         {
@@ -324,7 +363,7 @@ public slots:
             request = freeQueue.dequeue();
         }
 
-        request->addBuffer(m_previewStream, buffer);
+        request->addBuffer(stream, buffer);
 
         queueRequest(request);
     }
