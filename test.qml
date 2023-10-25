@@ -5,24 +5,9 @@ Rectangle {
     width: 800
     height: 600
 
-    LibCamera { 
+    LibCamera {
         id: cam
-        onImageCaptured: { 
-            pic.source = filename
-            console.log('image captured: ' + filename)
-        }
-        orientation: 90
+        anchors.fill: parent
     }
 
-    Image { 
-        id: pic
-        anchors.centerIn: parent
-        anchors.fill: parent
-        fillMode: Image.PreserveAspectFit
-    }
-
-    MouseArea { 
-        anchors.fill: parent
-        onClicked: cam.captureImage()
-    }
 }

@@ -19,7 +19,7 @@ find_package(PkgConfig REQUIRED)
 
 pkg_check_modules(LIBCAMERA REQUIRED IMPORTED_TARGET libcamera)
 
-set(SOURCES plugin.cpp)
+set(SOURCES plugin.cpp image.cpp)
 
 add_library(qmllibcameraplugin SHARED ${SOURCES})
 
