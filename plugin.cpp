@@ -314,16 +314,15 @@ public slots:
             QMutexLocker locker(&m_mutex);
 
             auto image = m_mappedBuffers[buffer].get();
-            QImage qimage;
 
             assert(buffer->planes().size() >= 1);
             if (m_viewFinderConverter)
-                qimage = m_viewFinderConverter(image->data(0).data(), m_size);
+                m_image = m_viewFinderConverter(image->data(0).data(), m_size);
             else
-                qimage = QImage(image->data(0).data(), m_size.width,
+                m_image = QImage(image->data(0).data(), m_size.width,
                                 m_size.height,
                                 m_viewFinderFormat);
-            m_image = qimage.scaled(width(), height(), Qt::KeepAspectRatio);
+            m_image_scaled = m_image.scaled(width(), height(), Qt::KeepAspectRatio);
             std::swap(buffer, m_displayedBuffer);
         }
         update();
@@ -397,6 +396,7 @@ private:
     libcamera::Size m_size;
     libcamera::FrameBuffer *m_displayedBuffer;
     QImage m_image;
+    QImage m_image_scaled;
 
 protected:
     QSGNode* updatePaintNode(QSGNode* node, UpdatePaintNodeData*) override
@@ -405,7 +405,7 @@ protected:
         if(!imgnode)
             imgnode = window()->createImageNode();
 
-        QSGTexture *texture = window()->createTextureFromImage(m_image);
+        QSGTexture *texture = window()->createTextureFromImage(m_image_scaled);
 
         imgnode->setRect(boundingRect());
         imgnode->setSourceRect(QRectF(QPointF(0.0, 0.0), texture->textureSize()));
