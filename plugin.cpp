@@ -27,7 +27,7 @@ static const QMap<libcamera::PixelFormat, QImage::Format> nativeFormats
     { libcamera::formats::RGB565, QImage::Format_RGB16 },
 };
 
-class LibCameraModel : public QQuickPaintedItem
+class LibCameraModel : public QQuickItem
 {
     Q_OBJECT
 
@@ -48,7 +48,7 @@ public:
         }
     };
     LibCameraModel(QQuickItem* parent = nullptr)
-        : QQuickPaintedItem(parent)
+        : QQuickItem(parent)
         , m_previewStream(nullptr)
         , m_secondaryStream(nullptr)
         , m_displayedBuffer(nullptr)
@@ -168,6 +168,7 @@ public:
             }
         }
         camera->requestCompleted.connect(this, &LibCameraModel::handleRequestCompleted);
+        setFlag(ItemHasContents, true);
     }
 
     ~LibCameraModel()
@@ -258,10 +259,6 @@ public:
                 // QDateTime::currentDateTime().toString(Qt::ISODate).replace(":", "_") + ".jpg";
     }
 
-signals:
-    // void imageCaptured();
-    // void orientationChanged(int orientation);
-
 public slots:
     void handleRequestCompleted(libcamera::Request *completedRequest) {
         if(!completedRequest)
@@ -316,7 +313,7 @@ public slots:
             assert(buffer->planes().size() >= 1);
             m_image = QImage(image->data(0).data(), m_size.width,
                                 m_size.height,
-                                m_viewFinderFormat);
+                                m_viewFinderFormat).scaled(width(), height(), Qt::KeepAspectRatio);
             // m_image = m_image.transformed(QTransform().rotate(m_orientation), Qt::FastTransformation);
             std::swap(buffer, m_displayedBuffer);
         }
@@ -348,9 +345,9 @@ public slots:
             renderComplete(buffer, m_secondaryStream);
     }
 
-    void paint(QPainter* painter) {
-        painter->drawImage(QRect(0,0,width(),height()), m_image);
-    }
+    // void paint(QPainter* painter) {
+    //     painter->drawImage(QRect(0,0,width(),height()), m_image);
+    // }
 
     void renderComplete(FrameBuffer *buffer, libcamera::Stream *stream)
     {
@@ -408,6 +405,24 @@ private:
     libcamera::Size m_size;
     libcamera::FrameBuffer *m_displayedBuffer;
     QImage m_image;
+
+protected:
+    QSGNode* updatePaintNode(QSGNode* node, UpdatePaintNodeData*) override
+    {
+        QSGImageNode* imgnode = static_cast<QSGImageNode*>(node);
+        if(!imgnode)
+            imgnode = window()->createImageNode();
+
+        QSGTexture *texture = window()->createTextureFromImage(m_image);
+
+        imgnode->setRect(boundingRect());
+        imgnode->setSourceRect(QRectF(QPointF(0.0, 0.0), texture->textureSize()));
+        imgnode->setTexture(texture);
+        imgnode->setOwnsTexture(true);
+
+        return imgnode;
+    }
+private:
 };
 
 class LibCameraPlugin : public QQmlExtensionPlugin
