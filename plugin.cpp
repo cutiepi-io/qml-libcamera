@@ -9,22 +9,36 @@
 #include <QQueue>
 #include <QDebug>
 #include "image.h"
+#include "frameconverter.h"
 
 using namespace libcamera;
 
-static const QMap<libcamera::PixelFormat, QImage::Format> nativeFormats
+
+std::vector<unsigned char> converterBuffer;
+
+typedef std::function<QImage(unsigned char*, const libcamera::Size&)> converterFunction;
+
+static const QMap<libcamera::PixelFormat, QPair<QImage::Format, converterFunction > > nativeFormats
 {
 #if QT_VERSION >= QT_VERSION_CHECK(5, 2, 0)
-    { libcamera::formats::ABGR8888, QImage::Format_RGBX8888 },
-    { libcamera::formats::XBGR8888, QImage::Format_RGBX8888 },
+    { libcamera::formats::ABGR8888, { { QImage::Format_RGBX8888 }, { converterFunction() } } },
+    { libcamera::formats::XBGR8888, { { QImage::Format_RGBX8888 }, { converterFunction() } } },
 #endif
-    { libcamera::formats::ARGB8888, QImage::Format_RGB32 },
-    { libcamera::formats::XRGB8888, QImage::Format_RGB32 },
+    { libcamera::formats::ARGB8888, { { QImage::Format_RGB32 }, { converterFunction() } } },
+    { libcamera::formats::XRGB8888, { { QImage::Format_RGB32 }, { converterFunction() } } },
 #if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
-    { libcamera::formats::RGB888, QImage::Format_BGR888 },
+    { libcamera::formats::RGB888, { { QImage::Format_BGR888 }, { converterFunction() } } },
 #endif
-    { libcamera::formats::BGR888, QImage::Format_RGB888 },
-    { libcamera::formats::RGB565, QImage::Format_RGB16 },
+    { libcamera::formats::BGR888, { { QImage::Format_RGB888 }, { converterFunction() } } },
+    { libcamera::formats::RGB565, { { QImage::Format_RGB16 }, { converterFunction() } } },
+    { libcamera::formats::YUYV, { { QImage::Format_RGB888 }, { [](unsigned char* input, const libcamera::Size& size) {
+        auto bufferSize = size.width * size.height * 3;
+
+        if (converterBuffer.size() != bufferSize)
+            converterBuffer.resize(size.width * size.height * 3);
+        yuyv_to_rgb(input, converterBuffer.data(), size.width, size.height);
+        return QImage(converterBuffer.data(), size.width, size.height, QImage::Format_RGB888);
+    } } } }
 };
 
 class LibCameraModel : public QQuickItem
@@ -86,10 +100,12 @@ public:
         if (format.isValid() == false)
             qWarning("Could not configure pixel format matching licamera and QImage");
         else
-            m_viewFinderFormat = nativeFormats[format];
+        {
+            m_viewFinderFormat = nativeFormats[format].first;
+            m_viewFinderConverter = nativeFormats[format].second;
+        }
         qDebug() << "Configured pixel format for view:" << m_viewFinderFormat;
         qDebug() << viewConfig.size.toString().c_str();
-        m_size = viewConfig.size;
 
         if (m_config->size() > 1)
         {
@@ -98,7 +114,10 @@ public:
             if (format.isValid() == false)
                 qWarning("Could not configure pixel format matching licamera and QImage");
             else
-                m_secondaryFormat = nativeFormats[format];
+            {
+                m_secondaryFormat = nativeFormats[format].first;
+                m_secondaryConverter = nativeFormats[format].second;
+            }
             qDebug() << "Configured pixel format for secondary:" << m_secondaryFormat;
             qDebug() << videoConfig.size.toString().c_str();
         }
@@ -117,6 +136,8 @@ public:
         if (camera->configure(m_config.get())) {
             qDebug() << "Failed to configure camera";
         }
+        m_size = viewConfig.size;
+        qDebug() << "Corrected resolution:" << m_size.toString().c_str();
 
         m_allocator = std::make_unique<libcamera::FrameBufferAllocator>(camera);
         m_previewStream = m_config->at(0).stream();
@@ -201,6 +222,7 @@ public:
 
     PixelFormat getBestFormat(libcamera::StreamConfiguration &streamConfig) {
         std::vector<PixelFormat> formats = streamConfig.formats().pixelformats();
+
         for (const PixelFormat &format : nativeFormats.keys()) {
             auto match = std::find_if(formats.begin(), formats.end(),
                                       [&](const PixelFormat &f) {
@@ -213,23 +235,6 @@ public:
         }
         return PixelFormat();
     }
-
-    // QString filename() const {
-    //     return m_filename;
-    // }
-
-    // int orientation() const {
-    //     return m_orientation;
-    // }
-
-    // void setOrientation(int orientation) {
-    //     if (m_orientation == orientation)
-    //         return;
-
-    //     m_orientation = orientation;
-    //     emit orientationChanged(m_orientation);
-    //     update();
-    // }
 
     Q_INVOKABLE void captureImage() {
         libcamera::Stream *stream = m_config->at(0).stream();
@@ -309,12 +314,16 @@ public slots:
             QMutexLocker locker(&m_mutex);
 
             auto image = m_mappedBuffers[buffer].get();
-            // qDebug() << buffer->planes().size() << image << m_viewFinderFormat << size << m_size.toString().c_str();
+            QImage qimage;
+
             assert(buffer->planes().size() >= 1);
-            m_image = QImage(image->data(0).data(), m_size.width,
+            if (m_viewFinderConverter)
+                qimage = m_viewFinderConverter(image->data(0).data(), m_size);
+            else
+                qimage = QImage(image->data(0).data(), m_size.width,
                                 m_size.height,
-                                m_viewFinderFormat).scaled(width(), height(), Qt::KeepAspectRatio);
-            // m_image = m_image.transformed(QTransform().rotate(m_orientation), Qt::FastTransformation);
+                                m_viewFinderFormat);
+            m_image = qimage.scaled(width(), height(), Qt::KeepAspectRatio);
             std::swap(buffer, m_displayedBuffer);
         }
         update();
@@ -325,29 +334,10 @@ public slots:
     void processSecondaryStream(FrameBuffer *buffer)
     {
         qDebug() << "processSecondaryStream";
-        /* Render the frame on the viewfinder. */
-        // size_t size = buffer->metadata().planes()[0].bytesused;
-
-        // {
-        //     QMutexLocker locker(&m_mutex);
-
-        //     auto image = m_mappedBuffers[buffer].get();
-        //     // qDebug() << buffer->planes().size() << image << m_viewFinderFormat << size << m_size.toString().c_str();
-        //     assert(buffer->planes().size() >= 1);
-        //     m_image = QImage(image->data(0).data(), m_size.width,
-        //                         m_size.height,
-        //                         m_viewFinderFormat);
-        //     // m_image = m_image.transformed(QTransform().rotate(m_orientation), Qt::FastTransformation);
-        //     std::swap(buffer, m_displayedBuffer);
-        // }
-        // update();
+        // We will actually do nothing with this!
         if (buffer) // we don't care of it anymore, put it to garbage
             renderComplete(buffer, m_secondaryStream);
     }
-
-    // void paint(QPainter* painter) {
-    //     painter->drawImage(QRect(0,0,width(),height()), m_image);
-    // }
 
     void renderComplete(FrameBuffer *buffer, libcamera::Stream *stream)
     {
@@ -397,6 +387,8 @@ private:
     // int m_orientation;
     QImage::Format  m_viewFinderFormat;
     QImage::Format  m_secondaryFormat;
+    converterFunction m_viewFinderConverter;
+    converterFunction m_secondaryConverter;
     libcamera::Stream *m_previewStream;
     libcamera::Stream *m_secondaryStream;
     std::vector<std::unique_ptr<libcamera::Request>> m_requests;

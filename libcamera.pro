@@ -5,7 +5,7 @@ TEMPLATE = lib
 CONFIG += link_pkgconfig
 PKGCONFIG += libcamera
 
-SOURCES += plugin.cpp image.cpp
+SOURCES += plugin.cpp image.cpp frameconverter.cpp
 
 DESTDIR = LibCamera
 TARGET  = qmllibcameraplugin
