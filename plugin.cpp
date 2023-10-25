@@ -6,6 +6,9 @@
 #include <QImage>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <QQueue>
+#include <QDebug>
+#include "image.h"
 
 using namespace libcamera;
 
@@ -24,17 +27,32 @@ static const QMap<libcamera::PixelFormat, QImage::Format> nativeFormats
     { libcamera::formats::RGB565, QImage::Format_RGB16 },
 };
 
-
-class LibCameraModel : public QObject
+class LibCameraModel : public QQuickPaintedItem
 {
     Q_OBJECT
-    Q_PROPERTY(QString filename READ filename NOTIFY imageCaptured)
-    Q_PROPERTY(int orientation READ orientation WRITE setOrientation NOTIFY orientationChanged)
+    // Q_PROPERTY(QString filename READ filename NOTIFY imageCaptured)
+    // Q_PROPERTY(int orientation READ orientation WRITE setOrientation NOTIFY orientationChanged)
 
 public:
-    LibCameraModel(QObject* parent = nullptr)
-        : QObject(parent)
-        , m_orientation(0)
+
+    class CaptureEvent : public QEvent
+    {
+    public:
+        CaptureEvent()
+            : QEvent(type())
+        {
+        }
+
+        static Type type()
+        {
+            static int type = QEvent::registerEventType();
+            return static_cast<Type>(type);
+        }
+    };
+    LibCameraModel(QQuickItem* parent = nullptr)
+        : QQuickPaintedItem(parent)
+        // , m_orientation(0)
+        , displayedBuffer(nullptr)
     {
         cm = new CameraManager();
         int ret = cm->start();
@@ -52,8 +70,8 @@ public:
 
         config = camera->generateConfiguration(
             {
-             libcamera::StreamRole::Viewfinder,
-             libcamera::StreamRole::Raw
+             libcamera::StreamRole::Viewfinder/*,
+             libcamera::StreamRole::VideoRecording*/
             }
         );
         if (!config) {
@@ -61,20 +79,30 @@ public:
         }
         qDebug() << config->size();
         libcamera::StreamConfiguration &viewConfig = config->at(0);
-        libcamera::StreamConfiguration &rawConfig = config->at(1);
+        // libcamera::StreamConfiguration &videoConfig = config->at(1);
+
+        // Override default resolution
+        viewConfig.size = { 2592, 1944 };
 
         PixelFormat format;
 
         format = getBestFormat(viewConfig);
         if (format.isValid() == false)
             qWarning("Could not configure pixel format matching licamera and QImage");
-        qDebug() << viewConfig.size.toString();
-        format = getBestFormat(rawConfig);
-        if (format.isValid() == false)
-            qWarning("Could not configure pixel format matching licamera and QImage");
-        qDebug() << rawConfig.size.toString();
-        config->addConfiguration(viewConfig);
-        config->addConfiguration(rawConfig);
+        else
+            m_viewFinderFormat = nativeFormats[format];
+        qDebug() << "Configured pixel format for view";
+        qDebug() << viewConfig.size.toString().c_str();
+        m_size = viewConfig.size;
+
+
+        // format = getBestFormat(videoConfig);
+        // if (format.isValid() == false)
+        //     qWarning("Could not configure pixel format matching licamera and QImage");
+        // else
+        //     m_secondaryFormat = nativeFormats[format];
+        // qDebug() << "Configured pixel format for raw";
+        // qDebug() << videoConfig.size.toString().c_str();
 
 
         libcamera::CameraConfiguration::Status status = config->validate();
@@ -93,12 +121,38 @@ public:
         }
 
         allocator = std::make_unique<libcamera::FrameBufferAllocator>(camera);
-        libcamera::Stream *stream = config->at(0).stream();
-        if (allocator->allocate(stream) <= 0) {
-            qDebug() << "Failed to allocate buffers";
+        m_previewStream = config->at(0).stream();
+        // m_secondaryStream = config->at(1).stream();
+        configureStreamBuffers(m_previewStream);
+        // configureStreamBuffers(m_secondaryStream);
+
+
+        /* Create requests and fill them with buffers from the viewfinder. */
+        while (!freeBuffers[m_previewStream].isEmpty()) {
+            FrameBuffer *buffer = freeBuffers[m_previewStream].dequeue();
+
+            std::unique_ptr<Request> request = camera->createRequest();
+            if (!request) {
+                qWarning() << "Can't create request";
+                ret = -ENOMEM;
+            }
+
+            ret = request->addBuffer(m_previewStream, buffer);
+            if (ret < 0) {
+                qWarning() << "Can't set buffer for request";
+            }
+            qDebug() << "Adding request";
+            requests.push_back(std::move(request));
         }
+
         if (camera->start()) {
             qWarning("Failed to start the camera");
+        }
+        for (std::unique_ptr<Request> &request : requests) {
+            ret = queueRequest(request.get());
+            if (ret < 0) {
+                qWarning() << "Can't queue request";
+            }
         }
         camera->requestCompleted.connect(this, &LibCameraModel::handleRequestCompleted);
     }
@@ -112,9 +166,27 @@ public:
         delete cm;
     }
 
+    void configureStreamBuffers(libcamera::Stream* stream)
+    {
+        if (allocator->allocate(stream) <= 0) {
+            qDebug() << "Failed to allocate buffers";
+        }
+        for (const std::unique_ptr<FrameBuffer> &buffer : allocator->buffers(stream)) {
+			/* Map memory buffers and cache the mappings. */
+            qDebug() << "Configuring buffer for " << stream;
+			std::unique_ptr<LibCameraImage> image =
+				LibCameraImage::fromFrameBuffer(buffer.get());
+			assert(image != nullptr);
+			mappedBuffers[buffer.get()] = std::move(image);
+
+			/* Store buffers on the free list. */
+			freeBuffers[stream].enqueue(buffer.get());
+		}
+    }
+
     PixelFormat getBestFormat(libcamera::StreamConfiguration &streamConfig) {
         std::vector<PixelFormat> formats = streamConfig.formats().pixelformats();
-
+        qDebug() << formats.size();
         for (const PixelFormat &format : nativeFormats.keys()) {
             auto match = std::find_if(formats.begin(), formats.end(),
                                       [&](const PixelFormat &f) {
@@ -123,28 +195,27 @@ public:
             if (match != formats.end()) {
                 streamConfig.pixelFormat = format;
                 return format;
-                m_viewFinderFormat = nativeFormats[format];
-                break;
             }
         }
         return PixelFormat();
     }
 
-    QString filename() const {
-        return m_filename;
-    }
+    // QString filename() const {
+    //     return m_filename;
+    // }
 
-    int orientation() const {
-        return m_orientation;
-    }
+    // int orientation() const {
+    //     return m_orientation;
+    // }
 
-    void setOrientation(int orientation) {
-        if (m_orientation == orientation)
-            return;
+    // void setOrientation(int orientation) {
+    //     if (m_orientation == orientation)
+    //         return;
 
-        m_orientation = orientation;
-        emit orientationChanged(m_orientation);
-    }
+    //     m_orientation = orientation;
+    //     emit orientationChanged(m_orientation);
+    //     update();
+    // }
 
     Q_INVOKABLE void captureImage() {
         libcamera::Stream *stream = config->at(0).stream();
@@ -170,44 +241,109 @@ public:
         request->addBuffer(stream, buffers[0].get());
         camera->queueRequest(request.get());
 
-        m_filename = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation) + "/" +
-                QDateTime::currentDateTime().toString(Qt::ISODate).replace(":", "_") + ".jpg";
+        // m_filename = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation) + "/" +
+                // QDateTime::currentDateTime().toString(Qt::ISODate).replace(":", "_") + ".jpg";
     }
 
 signals:
-    void imageCaptured();
-    void orientationChanged(int orientation);
+    // void imageCaptured();
+    // void orientationChanged(int orientation);
 
 public slots:
     void handleRequestCompleted(libcamera::Request *completedRequest) {
-        qDebug() << "handleRequestCompleted";
         if(!completedRequest)
             return;
+        {
+            QMutexLocker locker(&mutex);
+            doneQueue.enqueue(completedRequest);
+        }
+        QCoreApplication::postEvent(this, new CaptureEvent);
+    }
 
-        libcamera::Stream *stream = config->at(0).stream();
-        libcamera::FrameBuffer *buffer = completedRequest->findBuffer(stream);
-        if (!buffer) {
-            qDebug() << "No completed buffers";
-            return;
+    void processCapture()
+    {
+        FrameBuffer *buffer = nullptr;
+        Request *request = nullptr;
+        {
+            QMutexLocker locker(&mutex);
+            if (doneQueue.isEmpty())
+                return;
+
+            request = doneQueue.dequeue();
         }
 
-        const libcamera::FrameBuffer::Plane &plane = buffer->planes()[0];
-        void *data = mmap(NULL, plane.length, PROT_READ, MAP_SHARED, plane.fd.get(), 0);
-        if (data == MAP_FAILED) {
-            qDebug() << "Failed to map memory";
-            return;
+        /* Process buffers. */
+        if (request->buffers().count(m_previewStream))
+        {
+            buffer = request->buffers().at(m_previewStream);
+            processViewfinder(buffer);
         }
 
-        libcamera::Size size = config->at(0).size;
-        QImage image(static_cast<uchar *>(data), size.width, size.height, m_viewFinderFormat);
-        image = image.transformed(QTransform().rotate(m_orientation), Qt::FastTransformation);
-        image.save(m_filename);
-
-        if (munmap(data, plane.length) == -1) {
-            qDebug() << "Failed to unmap memory";
+        request->reuse();
+        {
+            QMutexLocker locker(&mutex);
+            freeQueue.enqueue(request);
         }
 
-        emit imageCaptured();
+    }
+
+    void processViewfinder(FrameBuffer *buffer)
+    {
+        /* Render the frame on the viewfinder. */
+        // size_t size = buffer->metadata().planes()[0].bytesused;
+
+        {
+            QMutexLocker locker(&mutex);
+
+            auto image = mappedBuffers[buffer].get();
+            // qDebug() << buffer->planes().size() << image << m_viewFinderFormat << size << m_size.toString().c_str();
+            assert(buffer->planes().size() >= 1);
+            m_image = QImage(image->data(0).data(), m_size.width,
+                                m_size.height,
+                                m_viewFinderFormat);
+            // m_image = m_image.transformed(QTransform().rotate(m_orientation), Qt::FastTransformation);
+            std::swap(buffer, displayedBuffer);
+        }
+        update();
+        if (buffer) // we don't care of it anymore, put it to garbage
+            renderComplete(buffer);
+    }
+
+    void paint(QPainter* painter) {
+        painter->drawImage(QRect(0,0,width(),height()), m_image);
+    }
+
+    void renderComplete(FrameBuffer *buffer)
+    {
+        Request *request;
+        {
+            QMutexLocker locker(&mutex);
+            if (freeQueue.isEmpty())
+                return;
+
+            request = freeQueue.dequeue();
+        }
+
+        request->addBuffer(m_previewStream, buffer);
+
+        queueRequest(request);
+    }
+
+    int queueRequest(Request *request)
+    {
+        return camera->queueRequest(request);
+    }
+
+    bool event(QEvent *e)
+    {
+        if (e->type() == CaptureEvent::type()) {
+            processCapture();
+            return true;
+        }/* else if (e->type() == HotplugEvent::type()) {
+            processHotplug(static_cast<HotplugEvent *>(e));
+            return true;
+        }*/
+        return QObject::event(e);
     }
 
 private:
@@ -216,11 +352,23 @@ private:
     std::unique_ptr<libcamera::CameraConfiguration> config;
     std::unique_ptr<libcamera::Request> request;
     std::unique_ptr<libcamera::FrameBufferAllocator> allocator;
-    QString m_filename;
-    int m_orientation;
+    std::map<libcamera::FrameBuffer *, std::unique_ptr<LibCameraImage>> mappedBuffers;
+    std::map<const libcamera::Stream *, QQueue<libcamera::FrameBuffer *>> freeBuffers;
+    QMutex  mutex;
+    QQueue<libcamera::Request *> doneQueue;
+	QQueue<libcamera::Request *> freeQueue;
+    // QString m_filename;
+    // int m_orientation;
     QImage::Format  m_viewFinderFormat;
-    QImage::Format  m_rawFormat;
+    QImage::Format  m_secondaryFormat;
+    libcamera::Stream *m_previewStream;
+    libcamera::Stream *m_secondaryStream;
+    std::vector<std::unique_ptr<libcamera::Request>> requests;
 
+    // Actual image / data
+    libcamera::Size m_size;
+    libcamera::FrameBuffer *displayedBuffer;
+    QImage m_image;
 };
 
 class LibCameraPlugin : public QQmlExtensionPlugin

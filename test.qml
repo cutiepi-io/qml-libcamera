@@ -9,5 +9,14 @@ Rectangle {
         id: cam
         anchors.fill: parent
     }
-
+    MouseArea {
+        anchors.fill: parent
+        onClicked: {
+            var orientation = cam.rotation
+            orientation += 45
+            if (orientation == 360)
+                orientation = 0
+            cam.rotation = orientation
+        }
+    }
 }
