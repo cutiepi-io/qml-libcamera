@@ -9,3 +9,5 @@ SOURCES += plugin.cpp image.cpp frameconverter.cpp
 
 DESTDIR = LibCamera
 TARGET  = qmllibcameraplugin
+
+QT += concurrent

@@ -9,6 +9,11 @@ Rectangle {
     height: 1080
     color: "black"
 
+    function snap() {
+        anim.start()
+        cam.saveToFile()
+    }
+
     MouseArea {
         anchors.fill: parent
         enabled: false
@@ -20,7 +25,7 @@ Rectangle {
             cam.rotation = orientation
         }
     }
-    
+
     Rectangle {
         id: captureAnimation
         anchors.centerIn: parent
@@ -40,14 +45,11 @@ Rectangle {
                 captureImg.visible = true
             }
         }
-    
+
 	focus: true
 	Keys.onPressed: {
 		if (event.key == Qt.Key_Return) {
-		   anim.start()
-		   console.log("taking picture...")
-		   cam.saveToFile("/tmp/toto.png")
-		   console.log("Done!")
+            root.snap();
 		}
 		else if (event.key == Qt.Key_Escape) {
 			console.log("exiting app")
@@ -58,10 +60,10 @@ Rectangle {
            id: cam
            width: 1920
            height: 1080
-           anchors.centerIn: parent   
+           anchors.centerIn: parent
     	}
     }
-    
+
     Button {
         id: captureImg
         width: 200
@@ -73,7 +75,7 @@ Rectangle {
 	contentItem: Text {
 		text:" Hit me to capture image !"
 		font.pointSize: 12
-		wrapMode: Text.WordWrap 
+		wrapMode: Text.WordWrap
 		horizontalAlignment: Text.AlignHCenter
 		verticalAlignment: Text.AlignVCenter
 	}
@@ -81,12 +83,8 @@ Rectangle {
         anchors.bottomMargin: 20
         anchors.horizontalCenter: parent.horizontalCenter
         onClicked: {
-		anim.start()
-		console.time("saving")
-		console.log("taking picture... (from mouse click)")
-		cam.saveToFile("toto.png")
-		console.log("Done!")
-		captureAnimation.focus = true
+            root.snap()
+            captureAnimation.focus = true
         }
     }
 }

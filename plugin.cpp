@@ -10,6 +10,7 @@
 #include <QDebug>
 #include "image.h"
 #include "frameconverter.h"
+#include <QtConcurrent>
 
 using namespace libcamera;
 
@@ -200,10 +201,12 @@ public:
         delete m_cm;
     }
 
-    Q_INVOKABLE void saveToFile(const QString& s) {
-	QMutexLocker locker(&m_mutex);
-	m_image.save(s);
-        qDebug()<<"file"<<s<<"saved";
+    Q_INVOKABLE void saveToFile() {
+        QMutexLocker locker(&m_mutex);
+        auto image_copy = m_image.copy();
+        QtConcurrent::run(QThreadPool::globalInstance(), [image_copy]() {
+            image_copy.save(QString("nice-group-picture.%1.png").arg(QDateTime::currentDateTimeUtc().toString("yyyy.MM.dd-hh:mm:ss.z")));
+        });
     }
 
     void configureStreamBuffers(libcamera::Stream* stream)
