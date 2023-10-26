@@ -13,7 +13,6 @@
 
 using namespace libcamera;
 
-
 std::vector<unsigned char> converterBuffer;
 
 typedef std::function<QImage(unsigned char*, const libcamera::Size&)> converterFunction;
@@ -201,6 +200,12 @@ public:
         delete m_cm;
     }
 
+    Q_INVOKABLE void saveToFile(const QString& s) {
+	QMutexLocker locker(&m_mutex);
+	m_image.save(s);
+        qDebug()<<"file"<<s<<"saved";
+    }
+
     void configureStreamBuffers(libcamera::Stream* stream)
     {
         if (!stream)
@@ -234,34 +239,6 @@ public:
             }
         }
         return PixelFormat();
-    }
-
-    Q_INVOKABLE void captureImage() {
-        libcamera::Stream *stream = m_config->at(0).stream();
-
-        m_allocator->free(stream);
-        camera->stop();
-        if (camera->configure(m_config.get())) {
-            qDebug() << "Failed to configure camera";
-        }
-
-        if (m_allocator->allocate(stream) <= 0) {
-            qDebug() << "Failed to allocate buffers";
-            return;
-        }
-        const std::vector<std::unique_ptr<libcamera::FrameBuffer>> &buffers = m_allocator->buffers(stream);
-        camera->start();
-
-        m_request = camera->createRequest();
-        if (!m_request) {
-            qDebug() << "Failed to create m_request";
-        }
-
-        m_request->addBuffer(stream, buffers[0].get());
-        camera->queueRequest(m_request.get());
-
-        // m_filename = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation) + "/" +
-                // QDateTime::currentDateTime().toString(Qt::ISODate).replace(":", "_") + ".jpg";
     }
 
 public slots:
